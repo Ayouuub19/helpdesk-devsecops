@@ -48,3 +48,6 @@ gitleaks-report.json
 semgrep-report.json
 trivy-*.json
 zap-report.*
+
+Projet_DevSecOps_Cahier_des_Charges.pdf
+rapport/
