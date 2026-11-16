@@ -1,0 +1,25 @@
+title = "HelpDesk Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+description = "Fake Test API Key Pattern"
+id = "fake-test-key"
+regex = '''sk-test-[A-Za-z0-9]{20,}'''
+tags = ["test", "api-key"]
+
+[allowlist]
+description = "Allowlisted files"
+paths = [
+    '''.gitleaks.toml''',
+    '''.*_test\.py$''',
+    '''\.env\.example$''',
+]
+regexes = [
+    '''FAKE.*KEY''',
+    '''CHANGE_ME''',
+    '''TEST_ONLY''',
+]
+
+stopWords = ["FAKE", "EXAMPLE", "TEST", "PLACEHOLDER", "CHANGE_ME"]

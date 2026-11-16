@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="mb-3">
+  <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">← Back to Dashboard</a>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+    <h4 class="mb-0">🎫 Ticket #{{ ticket.id }}: {{ ticket.title }}</h4>
+    {% if current_user.id == ticket.user_id or current_user.role == 'admin' %}
+    <a href="{{ url_for('delete_ticket', ticket_id=ticket.id) }}"
+       class="btn btn-danger btn-sm"
+       onclick="return confirm('Delete this ticket?')">🗑️ Delete</a>
+    {% endif %}
+  </div>
+  <div class="card-body">
+    <dl class="row">
+      <dt class="col-sm-2">Status</dt>
+      <dd class="col-sm-10">
+        {% if ticket.status == 'open' %}
+          <span class="badge bg-success">open</span>
+        {% elif ticket.status == 'in_progress' %}
+          <span class="badge bg-primary">in progress</span>
+        {% elif ticket.status == 'closed' %}
+          <span class="badge bg-dark">closed</span>
+        {% else %}
+          <span class="badge bg-secondary">{{ ticket.status }}</span>
+        {% endif %}
+      </dd>
+
+      <dt class="col-sm-2">Priority</dt>
+      <dd class="col-sm-10">
+        {% if ticket.priority == 'critical' %}
+          <span class="badge bg-danger">critical</span>
+        {% elif ticket.priority == 'high' %}
+          <span class="badge bg-warning text-dark">high</span>
+        {% elif ticket.priority == 'medium' %}
+          <span class="badge bg-info text-dark">medium</span>
+        {% else %}
+          <span class="badge bg-secondary">low</span>
+        {% endif %}
+      </dd>
+
+      <dt class="col-sm-2">Owner</dt>
+      <dd class="col-sm-10">{{ owner.username }} ({{ owner.email }})</dd>
+
+      <dt class="col-sm-2">Created</dt>
+      <dd class="col-sm-10">{{ ticket.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
+
+      <dt class="col-sm-2">Description</dt>
+      <dd class="col-sm-10">
+        <!-- INTENTIONAL XSS VULNERABILITY: description rendered without escaping (academic demo) -->
+        {{ ticket.description | safe }}
+      </dd>
+    </dl>
+  </div>
+</div>
+{% endblock %}

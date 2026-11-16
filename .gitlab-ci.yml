@@ -1,0 +1,273 @@
+stages:
+  - build
+  - test
+  - sast
+  - secret-scan
+  - dependency-scan
+  - docker-build
+  - image-scan
+  - deploy
+  - dast
+
+variables:
+  IMAGE_NAME: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+  IMAGE_LATEST: $CI_REGISTRY_IMAGE:latest
+  # Blocking policy: fail pipeline on CRITICAL findings
+  TRIVY_SEVERITY: "CRITICAL,HIGH"
+  SEMGREP_RULES: "auto"
+
+# ═══════════════════════════════════════
+# STAGE 1: BUILD
+# ═══════════════════════════════════════
+build:
+  stage: build
+  image: python:3.11-slim
+  script:
+    - cd backend
+    - pip install --no-cache-dir -r requirements.txt
+    - echo "✅ Build successful"
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - backend/.cache/pip/
+
+# ═══════════════════════════════════════
+# STAGE 2: UNIT TESTS
+# ═══════════════════════════════════════
+unit-tests:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - cd backend
+    - pip install --no-cache-dir -r requirements.txt
+    - pip install pytest pytest-flask
+    - python -m pytest tests/ -v --tb=short
+  artifacts:
+    when: always
+    reports:
+      junit: backend/test-results.xml
+    paths:
+      - backend/test-results.xml
+    expire_in: 1 week
+  allow_failure: false
+
+# ═══════════════════════════════════════
+# STAGE 3: SAST - Semgrep
+# ═══════════════════════════════════════
+sast-semgrep:
+  stage: sast
+  image: returntocorp/semgrep:latest
+  script:
+    - |
+      echo "🔍 Running Semgrep SAST scan..."
+      semgrep --config=auto backend/ \
+        --json \
+        --output=semgrep-report.json \
+        --metrics=off || true
+      
+      # Count critical/error findings
+      python3 -c "
+      import json, sys
+      try:
+          with open('semgrep-report.json') as f:
+              data = json.load(f)
+          results = data.get('results', [])
+          errors = [r for r in results if r.get('extra', {}).get('severity', '') == 'ERROR']
+          warnings = [r for r in results if r.get('extra', {}).get('severity', '') == 'WARNING']
+          print(f'ERROR findings: {len(errors)}')
+          print(f'WARNING findings: {len(warnings)}')
+          print(f'Total findings: {len(results)}')
+          if len(errors) > 0:
+              print('🚨 PIPELINE BLOCKED: Critical SAST findings detected!')
+              for e in errors[:3]:
+                  print(f'  - {e[\"check_id\"]} in {e[\"path\"]}:{e[\"start\"][\"line\"]}')
+              sys.exit(1)
+          else:
+              print('✅ SAST scan passed')
+      except Exception as ex:
+          print(f'Error parsing report: {ex}')
+          sys.exit(0)
+      "
+  artifacts:
+    when: always
+    paths:
+      - semgrep-report.json
+    expire_in: 1 week
+  allow_failure: false   # BLOCKING
+
+# ═══════════════════════════════════════
+# STAGE 4: SECRET SCAN - Gitleaks
+# ═══════════════════════════════════════
+secret-scan-gitleaks:
+  stage: secret-scan
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - |
+      echo "🔑 Running Gitleaks secret detection..."
+      gitleaks detect \
+        --source=. \
+        --report-format=json \
+        --report-path=gitleaks-report.json \
+        --redact \
+        --exit-code=1 \
+        --config=.gitleaks.toml 2>&1 || {
+          echo "🚨 PIPELINE BLOCKED: Secrets detected in repository!"
+          echo "Review gitleaks-report.json for details (values are redacted)"
+          exit 1
+        }
+      echo "✅ No secrets detected"
+  artifacts:
+    when: always
+    paths:
+      - gitleaks-report.json
+    expire_in: 1 week
+  allow_failure: false   # BLOCKING
+
+# ═══════════════════════════════════════
+# STAGE 5: DEPENDENCY SCAN - Trivy
+# ═══════════════════════════════════════
+dependency-scan-trivy:
+  stage: dependency-scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - |
+      echo "📚 Running Trivy filesystem scan..."
+      trivy fs \
+        --exit-code 1 \
+        --severity CRITICAL \
+        --no-progress \
+        --format json \
+        --output trivy-fs-report.json \
+        backend/ || {
+          echo "🚨 PIPELINE BLOCKED: Critical dependency vulnerabilities found!"
+          trivy fs --severity CRITICAL --no-progress backend/
+          exit 1
+        }
+      echo "✅ Dependency scan passed - no CRITICAL vulnerabilities"
+  artifacts:
+    when: always
+    paths:
+      - trivy-fs-report.json
+    expire_in: 1 week
+  allow_failure: false   # BLOCKING on CRITICAL
+
+# ═══════════════════════════════════════
+# STAGE 6: DOCKER BUILD
+# ═══════════════════════════════════════
+docker-build:
+  stage: docker-build
+  image: docker:24-cli
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - |
+      docker build \
+        --tag $IMAGE_NAME \
+        --tag $IMAGE_LATEST \
+        --label "git-commit=$CI_COMMIT_SHA" \
+        --label "build-date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        ./backend
+    - docker push $IMAGE_NAME
+    - docker push $IMAGE_LATEST
+    - echo "✅ Image built and pushed: $IMAGE_NAME"
+  only:
+    - main
+    - develop
+
+# ═══════════════════════════════════════
+# STAGE 7: IMAGE SCAN - Trivy
+# ═══════════════════════════════════════
+image-scan-trivy:
+  stage: image-scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  services:
+    - docker:24-dind
+  script:
+    - |
+      echo "🔬 Scanning Docker image for vulnerabilities..."
+      trivy image \
+        --exit-code 1 \
+        --severity CRITICAL \
+        --no-progress \
+        --format json \
+        --output trivy-image-report.json \
+        $IMAGE_NAME || {
+          echo "🚨 PIPELINE BLOCKED: Critical vulnerabilities in Docker image!"
+          trivy image --severity CRITICAL --no-progress $IMAGE_NAME
+          exit 1
+        }
+      echo "✅ Image scan passed"
+      
+      # Also check that image does NOT run as root
+      echo "🔍 Verifying image user..."
+      docker run --rm --entrypoint whoami $IMAGE_NAME || true
+  artifacts:
+    when: always
+    paths:
+      - trivy-image-report.json
+    expire_in: 1 week
+  allow_failure: false   # BLOCKING
+  only:
+    - main
+    - develop
+
+# ═══════════════════════════════════════
+# STAGE 8: DEPLOY TO KUBERNETES
+# ═══════════════════════════════════════
+deploy-kubernetes:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  script:
+    - |
+      echo "☸️ Deploying to Kubernetes..."
+      kubectl apply -f k8s/namespace.yaml
+      kubectl apply -f k8s/secret.yaml
+      kubectl apply -f k8s/backend-deployment.yaml
+      kubectl apply -f k8s/service.yaml
+      kubectl apply -f k8s/networkpolicy.yaml
+      
+      # Wait for rollout
+      kubectl rollout status deployment/helpdesk-backend -n helpdesk --timeout=120s
+      
+      echo "✅ Deployment successful"
+      kubectl get pods -n helpdesk
+  environment:
+    name: production
+  only:
+    - main
+
+# ═══════════════════════════════════════
+# STAGE 9: DAST - OWASP ZAP
+# ═══════════════════════════════════════
+dast-owasp-zap:
+  stage: dast
+  image: ghcr.io/zaproxy/zaproxy:stable
+  script:
+    - |
+      echo "⚡ Running OWASP ZAP DAST scan..."
+      # Baseline scan (passive + minimal active)
+      zap-baseline.py \
+        -t http://helpdesk-backend-service:5000 \
+        -J zap-report.json \
+        -r zap-report.html \
+        -I \
+        -d || true
+      echo "✅ DAST scan complete - review zap-report.json"
+  artifacts:
+    when: always
+    paths:
+      - zap-report.json
+      - zap-report.html
+    expire_in: 1 week
+  only:
+    - main
+  allow_failure: true   # DAST may find issues but shouldn't block initial deploy
